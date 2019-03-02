@@ -1,0 +1,446 @@
+#!/usr/bin/perl -w
+
+# This is BlockSSHD which protects computers from SSH brute force attacks by
+# dynamically blocking IP addresses using iptables based on log entries.
+# BlockSSHD is modified from BruteForceBlocker v1.2.3 by Daniel Gerzo
+ 
+# Copyright (C) 2006, James Turnbull
+# Support for pf and whois added by Anton - valqk@webreality.org - http://www.webreality.org
+# Support for subnets in the whitelist added by Lester Hightower - hightowe@10east.com - http://www.10east.com/
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+# Public License for more details.
+
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+
+use strict;
+use warnings;
+
+use Sys::Syslog;
+use Sys::Hostname;
+use Tie::File;
+use File::Tail;
+use Net::DNS::Resolver;
+use Net::Subnets; 
+use Getopt::Long;
+
+use POSIX qw(setsid);
+use vars qw($opt_d $opt_h $opt_v $opt_stop);
+
+$ENV{'PATH'} = '/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin';
+
+my $version = "1.3";
+
+our $cfg;
+
+# This is where the configuration file is located
+require '/etc/blocksshd.conf';
+
+my $work = {
+        ipv4            => '(?:\d{1,3}\.){3}\d{1,3}',   # regexp to match ipv4 address
+        fqdn            => '[\da-z\-.]+\.[a-z]{2,4}',   # regexp to match fqdn
+        hostname        => hostname,                    # get hostname
+};
+
+$cfg->{'whitelist_prepared'}=&loadwhitelist($cfg->{whitelist});
+
+Getopt::Long::Configure('bundling');
+GetOptions
+        ("start" => \$opt_d, "daemon"  => \$opt_d, "d" => \$opt_d,
+         "h" => \$opt_h, "help"        => \$opt_h,
+         "v" => \$opt_v, "version"     => \$opt_v,
+         "stop" => \$opt_stop);
+
+if ($opt_d) {
+         if (-e $cfg->{pid_file})
+            { die "BlockSSHD is already running!\n" }
+
+         # Fork daemon   
+         chdir '/' || die "Can't change directory to /: $!";
+         umask 0;        
+         open(STDIN,  "+>/dev/null");
+         open(STDOUT, "+>&STDIN");
+         open(STDERR, "+>&STDIN");
+         defined(my $pid = fork) || die "Can't fork: $!";
+         exit if $pid;
+         setsid || die "Can't start a new session: $!";
+
+         # Record PID
+         open (PID,">$cfg->{pid_file}") || die ("Cannot open BlockSSHD PID file $cfg->{pid_file}!\n");
+         print PID "$$\n";
+         close PID;
+}
+
+if ($opt_stop) {
+        exithandler();
+}
+
+if ($opt_h) {
+        print_help();
+        exit;
+}
+
+if ($opt_v) {
+        print "BlockSSHD version $version\n";
+        exit;
+}
+
+openlog('blocksshd', 'pid', 'auth');
+
+my $alarmed = 0; # ALRM state
+my %count = (); # hash used to store total number of failed tries
+my %timea = (); # hash used to store last time when IP was active
+my %timeb = (); # hash used to store time when IP was blocked
+my $res   = Net::DNS::Resolver->new;
+
+# Watch signals
+
+$SIG{'ALRM'} = \&unblock;
+$SIG{'INT'}  = \&exithandler;
+$SIG{'QUIT'} = \&exithandler;
+$SIG{'KILL'} = \&exithandler;
+$SIG{'TERM'} = \&exithandler;
+
+# Notify of startup
+
+syslog('notice', "Starting BlockSSHD");
+
+# Create iptables chain
+
+setup();
+
+# Clear existing rules
+
+flush();
+
+# Restore previously blocked rules
+
+if($cfg->{restore_blocked} == 1) {
+    restore_blocked();
+}
+
+# The core process
+
+my $ref=tie *FH, "File::Tail", (name=>$cfg->{logfile},
+                        maxinterval=>$cfg->{logcheck},
+                        interval=> 10,
+                        errmode=> "return");
+
+if ( $cfg->{unblock} == 1) {
+alarm( ($cfg->{unblock_timeout} /2) );
+}
+
+while (<FH>) {
+    if( $alarmed ) {
+        $alarmed = 0;
+        next;
+      }   
+
+    if (
+        /.*Failed (password) .* from ($work->{ipv4}|$work->{fqdn}) port [0-9]+/i ||
+        /.*(Invalid|Illegal) user .* from ($work->{ipv4}|$work->{fqdn})$/i ||
+        /.*Failed .* for (invalid|illegal) user * from ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i ||
+        /.*Failed .* for (invalid|illegal) user .* from ($work->{ipv4}|$work->{fqdn})/i ||
+        /.*(Postponed) .* for .* from ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i ||
+        /.*Did not receive (identification) string from ($work->{ipv4}|$work->{fqdn})$/i ||
+        /.*Bad protocol version (identification) .* from ($work->{ipv4}|$work->{fqdn})$/i ||
+        /.* login attempt for (nonexistent) user from ($work->{ipv4}|$work->{fqdn})$/i ||
+        /.* bad (password) attempt for '.*' from ($work->{ipv4}|$work->{fqdn}):[0-9]+/i ||
+        /.*unknown (user) .* from ($work->{ipv4}|$work->{fqdn}).*/i ||
+        /.*User .* (from) ($work->{ipv4}|$work->{fqdn}) not allowed because.*/i ||
+        /.*USER.*no such (user) found from ($work->{ipv4}|$work->{fqdn}).*/i
+       ) {
+        if($1 || $2) {
+         my $IP=$1 unless $2;
+         $IP=$2 if $2;
+              if ( $IP =~ /$work->{fqdn}/i) {
+                foreach my $type (qw(AAAA A)) {
+                    my $query = $res->search($IP, $type);
+                    if ($query) {
+                        foreach my $rr ($query->answer) {
+                            block($rr->address);
+                        }
+                    }
+                }
+            } else {
+                block($IP);
+              }
+        }
+    }
+}
+
+closelog();
+
+sub block {
+    # Confirm iptables table is created
+    setup();
+ 
+    my ($IP) = shift or die "Missing IP address!\n";
+    
+    # check to see if IP address already blocked
+    
+    if($cfg->{os} eq 'linux') {
+    my ($exists) = system("$cfg->{iptables} -n -L $cfg->{chain} | grep -q '$IP'");
+    if ($exists == 0) {
+       return;
+       }
+    }
+    elsif($cfg->{os} eq 'bsd') {
+    my ($exists) = system("$cfg->{pfctl} -t $cfg->{chain} -T show| grep -q '$IP'"); 
+    if ($exists == 0) {
+       return;
+       }
+    }
+    
+    # Reset IP count if timeout exceeded 
+    if ($timea{$IP} && ($timea{$IP} < time - $cfg->{timeout})) {
+        syslog('notice', "Resetting $IP count, since it wasn't active for more than $cfg->{timeout} seconds");
+        delete $count{$IP};
+    }
+    $timea{$IP} = time;
+
+    # increase the total number of failed attempts
+    $count{$IP}++;
+
+    if ($count{$IP} < $cfg->{max_attempts}+1) {
+        syslog('notice', "$IP was logged with a total count of $count{$IP} failed attempts");
+    }
+    if ($count{$IP} >= $cfg->{max_attempts}+1) {
+        syslog('notice', "IP $IP reached the maximum number of failed attempts!");
+        system_block($IP);
+    }
+}
+
+sub system_block {
+    my $IP=shift or die("Can't find IP to block.\n");
+    if (ref($cfg->{'whitelist_prepared'}->check(\$IP)) ne 'SCALAR') {
+        if($cfg->{os} eq 'linux') {
+            syslog('notice', "Blocking $IP in iptables table $cfg->{chain}.");
+            system("$cfg->{iptables} -I $cfg->{chain} -p tcp --dport 22 -s $IP -j DROP") == 0 || syslog('notice', "Couldn't add $IP to firewall");
+        }
+        if($cfg->{os} eq 'bsd') {
+            syslog('notice', "Blocking $IP in pf table $cfg->{chain}.");
+            system("$cfg->{pfctl} -t $cfg->{chain} -T add $IP") == 0 || syslog('notice', "Couldn't add $IP to firewall");
+        }
+        $timeb{$IP} = time;
+        # send mail if it is configured
+        if ($cfg->{send_email} eq '1') {
+            notify($IP);
+        }
+        if ($cfg->{restore_blocked} eq '1') {
+            log_ip($IP);
+        }
+    }
+}
+
+sub setup {
+         # Check and setup iptables table if missing
+           if($cfg->{os} eq 'linux') {
+                system("$cfg->{iptables} -L $cfg->{chain} | grep -qs '$cfg->{chain}'") == 0 ||
+                system("$cfg->{iptables} -N $cfg->{chain}");
+           } 
+         # Create IP log file if restore block function is on
+           if($cfg->{restore_blocked} == 1) { 
+                if( !-e $cfg->{log_ips} ) {
+                  open CLOG,">$cfg->{log_ips}" || syslog('notice',"Can't create $cfg->{log_ips}\n");
+                  close(CLOG);
+                }
+           }
+}
+
+sub flush {
+         # Flush any existing firewall rules
+           syslog('notice', "Flushing existing rules in $cfg->{chain}.");
+           if($cfg->{os} eq 'linux') {
+                system("$cfg->{iptables} -F $cfg->{chain}") == 0 || syslog('notice', "Unable to flush existing firewalls rules from $cfg->{chain}");
+           } elsif($cfg->{os} eq 'bsd') {
+                system("$cfg->{pfctl} -t $cfg->{chain} -T flush") == 0 || syslog('notice', "Unable to flush existing firewalls rules from $cfg->{chain}");
+           } else {
+                syslog('notice',"No operating system specified in blocksshd.conf configuration file.");
+            }
+         # If blocking restore is turned off then clear contents of block
+         # file
+           if($cfg->{restore_blocked} == 0) {
+                if( -e $cfg->{log_ips} && !-z $cfg->{log_ips} ) {
+                    unlink($cfg->{log_ips});
+                }           
+           } 
+}
+
+sub unblock {
+            # unblock old IPs based on timeout
+            $alarmed = 1;
+
+            if($cfg->{os} eq 'linux') {
+                open IPT, "$cfg->{iptables} -n -L $cfg->{chain} |";
+
+                     while(<IPT>) {
+                     chomp;
+                     next if ($_ !~ /^DROP/);
+                     my ($target, $prot, $opt, $source, $dest, $prot2, $dport) = split(' ', $_);
+                        while ( my ($block_ip, $block_time) = each(%timeb) ) {
+                              if (($block_ip == $source) && ($block_time < time - $cfg->{unblock_timeout})) {
+                              syslog('notice', "Unblocking IP address $block_ip.");
+                              system("$cfg->{iptables} -D $cfg->{chain} -p tcp --dport 22 -s $block_ip -j DROP ") == 0 || syslog('notice', "Couldn't unblock $block_ip from firewall.");
+                               if( -e $cfg->{log_ips} && ((-s $cfg->{log_ips}) > 0)) {
+                                 unlog_ip($block_ip);
+                               }
+                              delete $timeb{$block_ip};
+                              delete $timea{$block_ip};
+                              delete $count{$block_ip};
+                              }
+                         }
+                     }
+                     
+                close IPT;
+ 
+            } elsif($cfg->{os} eq 'bsd') {
+                open IPT, "$cfg->{pfctl} -t $cfg->{chain} -T show|" || syslog('error',"Can't open $cfg->{pfctl} for reading.");
+            
+                     while(<IPT>) {
+                     s/^\s+//;
+                     my $source=$_; 
+                        while ( my ($block_ip, $block_time) = each(%timeb) ) {
+                              if (($block_ip == $source) && ($block_time < time - $cfg->{unblock_timeout})) {
+                                 syslog('notice', "Unblocking IP address $block_ip.");
+                                 system("$cfg->{pfctl} -t $cfg->{chain} -T delete $block_ip") == 0 || syslog('notice', "Couldn't unblock $block_ip from firewall.");
+                              if( $cfg->{restore_blocked} == 1) {
+                                 unlog_ip($block_ip);
+                               }
+                              delete $timeb{$block_ip};
+                              delete $timea{$block_ip};
+                              delete $count{$block_ip};
+                              }
+                        }
+                     }
+                 
+                close IPT;
+
+             } else {
+                die("No operating system specified in blocksshd.conf configuration file.");
+             }
+                   
+            alarm( ($cfg->{unblock_timeout}/2) );
+}
+
+sub loadwhitelist {
+                  my $rwhiteList = shift @_;	# $cfg->{whitelist}
+                  my $sn = Net::Subnets->new;
+
+                  if (ref($rwhiteList) eq 'ARRAY') {
+                     my @subnets = map { chomp $_; &trim($_); } @{$rwhiteList};
+                     @subnets = grep(!/^#|^$/, @subnets);
+                     my $p_sn='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]{1,2}$';
+                     my @bad_subnets = grep(!/$p_sn/, @subnets);
+
+                  if (scalar(@bad_subnets) > 0) {
+                     die "The whilelist holds invalid subnet entries: " .
+                     join(', ', @bad_subnets) . "\n";
+                  }
+
+                  @subnets = grep(/$p_sn/, @subnets);
+                  $sn->subnets( \@subnets );
+                  }
+
+                  return $sn;
+}
+
+sub trim {
+   my $str=shift @_;
+   $str =~ s/^[\s\r\n]+//;
+   $str =~ s/[\s\r\n]+$//;
+   return $str;
+}
+
+sub log_ip {
+    my $IP = shift or syslog('notice',"Can't get ip to log!\n");
+    my $inlist=0;
+    if( -e $cfg->{log_ips} && ((-s $cfg->{log_ips}) > 0)) {
+        open LOG,"<$cfg->{log_ips}" || syslog('notice',"Can't open $cfg->{log_ips}\n");
+        while(<LOG>) {
+            chomp;
+            if($_ == $IP) {
+                $inlist=1;
+                last;
+            }
+        }
+        close LOG;
+    }
+    if($inlist == 0) {
+        open LOG,">>$cfg->{log_ips}" || syslog('notice',"Can't open $cfg->{log_ips}\n");
+        print LOG "$IP\n";
+        close LOG;
+    }
+}
+
+sub unlog_ip {
+    my $block_ip = shift or die("Can't get IP to unlog!\n");
+    my @file;
+
+     if( -e $cfg->{log_ips} && ((-s $cfg->{log_ips}) > 0)) {
+    
+        tie @file, 'Tie::File', $cfg->{log_ips};
+        @file=grep { $_ ne $block_ip } @file;
+        untie @file;
+    
+        syslog('notice',"Removed unblocked IP address ($block_ip) from log file $cfg->{log_ips}");
+     }  
+}
+
+sub restore_blocked {
+    if( -e $cfg->{log_ips} && ((-s $cfg->{log_ips}) > 0)) {
+        open RLOG,"<$cfg->{log_ips}" || syslog('notice',"Can't open $cfg->{log_ips}\n");
+        while(<RLOG>) {
+            chomp;
+            if(/$work->{ipv4}|$work->{fqdn}/i) {
+                syslog('notice',"Blocking IP $_ - previously blocked and saved in $cfg->{log_ips}");
+                system_block($_);
+            }
+             else {
+                syslog('notice',"Invalid IP address ($_) found in $cfg->{log_ips}");
+            }
+        }
+        close (RLOG);
+    }
+}
+
+sub notify {
+    # send notification emails
+    my ($IP) = shift or die "Missing IP address!\n";       
+   
+    syslog('notice', "Sending notification email to $cfg->{email}");
+    my $whois = '';
+      if($cfg->{email_whois_lookup} == 1) {
+           $whois = `$cfg->{whois} $IP|$cfg->{sed} -e 's/\"/\\"/g'`;      
+      }
+    system("echo \"$work->{hostname}: BlockSSHD blocking $IP\n\n $whois\" | $cfg->{mail} -s 'BlockSSHD blocking notification' $cfg->{email}"); 
+}
+
+sub exithandler {
+    if (-e $cfg->{pid_file})
+    {
+        my $pid=`/bin/cat $cfg->{pid_file}`;
+        system("/bin/kill -9 $pid");
+        unlink($cfg->{pid_file});
+        die "BlockSSHD exiting\n";
+    } else {
+        die "BlockSSHD is not running!\n";
+    }
+}
+
+sub print_help {
+    print "BlockSSHD command line options\n";
+    print "-d | --daemon | --start  Start BlockSSHD in daemon mode\n";
+    print "--stop                   Stop BlockSSHD\n";
+    print "-h | --help              Print this help text\n";
+    print "-v | --version           Display version\n";
+}
