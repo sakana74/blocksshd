@@ -33,6 +33,12 @@ use Net::DNS::Resolver;
 use Net::Subnets; 
 use Getopt::Long;
 
+use warnings;
+use strict;
+use Socket;
+
+
+
 use POSIX qw(setsid);
 use vars qw($opt_d $opt_h $opt_v $opt_stop);
 
@@ -370,7 +376,7 @@ sub log_ip {
         open LOG,"<$cfg->{log_ips}" || syslog('notice',"Can't open $cfg->{log_ips}\n");
         while(<LOG>) {
             chomp;
-            if( IPAddress($_) == IPAddress($IP) ) {
+            if( ip2long($_) == ip2long($IP) ) {
                 $inlist=1;
                 last;
             }
@@ -426,6 +432,20 @@ sub notify {
       }
     system("echo \"$work->{hostname}: BlockSSHD blocking $IP\n\n $whois\" | $cfg->{mail} -s 'BlockSSHD blocking notification' $cfg->{email}"); 
 }
+
+
+
+
+sub ip2long {
+    return unpack("l*", pack("l*", unpack("N*", inet_aton(shift))));
+}
+
+sub long2ip {
+    return inet_ntoa(pack("N*", shift));
+}
+
+
+
 
 sub exithandler {
     if (-e $cfg->{pid_file})
