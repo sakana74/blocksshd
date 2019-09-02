@@ -32,6 +32,7 @@ use File::Tail;
 use Net::DNS::Resolver;
 use Net::Subnets; 
 use Getopt::Long;
+use Socket;
 
 
 
