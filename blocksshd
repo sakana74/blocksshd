@@ -370,7 +370,7 @@ sub log_ip {
         open LOG,"<$cfg->{log_ips}" || syslog('notice',"Can't open $cfg->{log_ips}\n");
         while(<LOG>) {
             chomp;
-            if($_ == $IP) {
+            if( IPAddress($_) == IPAddress($IP) ) {
                 $inlist=1;
                 last;
             }
