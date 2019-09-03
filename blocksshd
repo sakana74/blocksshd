@@ -148,7 +148,6 @@ while (<FH>) {
         next;
       }   
 
-	print $_;
     if (
         /.*Failed (password) .* from ($work->{ipv4}|$work->{fqdn}) port [0-9]+/i ||
         /.*(Invalid|Illegal) user .* from ($work->{ipv4}|$work->{fqdn})$/i ||
