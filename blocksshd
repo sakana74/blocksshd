@@ -427,7 +427,6 @@ sub notify {
       if($cfg->{email_whois_lookup} == 1) {
            $whois = `$cfg->{whois} $IP|$cfg->{sed} -e 's/\"/\\"/g'`;      
       }
-      print "echo \"$work->{hostname}: BlockSSHD blocking $IP\n\n $whois\" | $cfg->{mail} -s 'BlockSSHD blocking notification' $cfg->{email}";
     system("echo \"$work->{hostname}: BlockSSHD blocking $IP\n\n $whois\" | $cfg->{mail} -s 'BlockSSHD blocking notification' $cfg->{email}"); 
 }
 
