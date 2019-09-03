@@ -167,13 +167,10 @@ while (<FH>) {
         /.*Disconnected from authenticating user .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i ||
         /.*Unable to negotiate with .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i
        ) {
-        print  "$1\n";
         if($1 || $2) {
          my $IP=$1 unless $2;
          $IP=$2 if $2;
-        print  "IP $IP\n";
-              if ( $IP =~ /$work->{fqdn}/i) {
-                print  "$IP hit ip\n";
+            if ( $IP =~ /$work->{fqdn}/i) {
                 foreach my $type (qw(AAAA A)) {
                     my $query = $res->search($IP, $type);
                     if ($query) {
@@ -184,7 +181,7 @@ while (<FH>) {
                 }
             } else {
                 block($IP);
-              }
+            }
         }
     }
 }
@@ -199,6 +196,8 @@ sub block {
     
     # check to see if IP address already blocked
     
+    print  "$IP hit ip 1\n";
+    
     if($cfg->{os} eq 'linux') {
     my ($exists) = system("$cfg->{iptables} -n -L $cfg->{chain} | grep -q '$IP'");
     if ($exists == 0) {
@@ -212,6 +211,7 @@ sub block {
        }
     }
     
+    print  "$IP hit ip 2\n";
     # Reset IP count if timeout exceeded 
     if ($timea{$IP} && ($timea{$IP} < time - $cfg->{timeout})) {
         syslog('notice', "Resetting $IP count, since it wasn't active for more than $cfg->{timeout} seconds");
