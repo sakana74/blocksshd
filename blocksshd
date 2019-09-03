@@ -169,13 +169,11 @@ while (<FH>) {
        ) {
         print  "1\n";
         print  "$1\n";
-        print  "$2\n";
         if($1 || $2) {
-	     print  "2\n";
          my $IP=$1 unless $2;
          $IP=$2 if $2;
               if ( $IP =~ /$work->{fqdn}/i) {
-                print  $IP;
+                print  "$IP hit ip\n";
                 foreach my $type (qw(AAAA A)) {
                     my $query = $res->search($IP, $type);
                     if ($query) {
