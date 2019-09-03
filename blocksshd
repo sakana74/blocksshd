@@ -161,8 +161,7 @@ while (<FH>) {
         /.*unknown (user) .* from ($work->{ipv4}|$work->{fqdn}).*/i ||
         /.*User .* (from) ($work->{ipv4}|$work->{fqdn}) not allowed because.*/i ||
         /.*USER.*no such (user) found from ($work->{ipv4}|$work->{fqdn}).*/i ||
-        /.*Disconnecting invalid user .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i ||
-        /.*Unable to negotiate with ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i
+        /.*Disconnecting invalid user .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i
        ) {
         if($1 || $2) {
          my $IP=$1 unless $2;
