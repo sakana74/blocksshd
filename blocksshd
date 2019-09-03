@@ -171,6 +171,7 @@ while (<FH>) {
          my $IP=$1 unless $2;
          $IP=$2 if $2;
               if ( $IP =~ /$work->{fqdn}/i) {
+                print  $IP;
                 foreach my $type (qw(AAAA A)) {
                     my $query = $res->search($IP, $type);
                     if ($query) {
