@@ -195,7 +195,6 @@ sub block {
     
     # check to see if IP address already blocked
     
-    print  "$IP hit ip 1\n";
     
     if($cfg->{os} eq 'linux') {
     my ($exists) = system("$cfg->{iptables} -n -L $cfg->{chain} | grep -q '$IP'");
@@ -210,7 +209,6 @@ sub block {
        }
     }
     
-    print  "$IP hit ip 2\n";
     # Reset IP count if timeout exceeded 
     if ($timea{$IP} && ($timea{$IP} < time - $cfg->{timeout})) {
         syslog('notice', "Resetting $IP count, since it wasn't active for more than $cfg->{timeout} seconds");
