@@ -167,6 +167,7 @@ while (<FH>) {
         /.*Disconnected from authenticating user .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i ||
         /.*Unable to negotiate with .* ($work->{ipv4}|$work->{fqdn}) port [0-9]+ .*/i
        ) {
+        print  "1";
         if($1 || $2) {
          my $IP=$1 unless $2;
          $IP=$2 if $2;
